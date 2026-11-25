@@ -19,6 +19,7 @@ from src.constructive_v2 import (
 )
 from src.constructive_v3 import search_sliding_diamond_columns
 from src.constructive_v4 import search_oblique_columns
+from src.constructive_v5 import pack_rectangle, search_matched_rectangular_strips
 from src.contact_lp import refine
 from src.optimizer import _energy_and_grad, optimize_puzzle_lbfgs
 from src.validator import validate_puzzle
@@ -174,6 +175,26 @@ class SolverTests(unittest.TestCase):
             self.assertLess(refined.side_length, p55.side_length)
             res = validate_puzzle(55, refined.xs, refined.ys, refined.angles)
             self.assertTrue(res.valid, f"n=55 refined invalid: {res.error}")
+            self.assertEqual(res.ambiguous_pairs_checked, 0)
+
+    def test_pack_rectangle_beats_grid_strip(self) -> None:
+        pts = pack_rectangle(6.95, 26.95, fine=True)
+        self.assertGreaterEqual(len(pts), 170)
+        xs, ys, angs = pts[:, 0], pts[:, 1], pts[:, 2]
+        h = 0.5 * (np.abs(np.cos(angs)) + np.abs(np.sin(angs)))
+        self.assertTrue(np.all(xs - h >= -1e-9))
+        self.assertTrue(np.all(xs + h <= 6.95 + 1e-9))
+        self.assertTrue(np.all(ys - h >= -1e-9))
+        self.assertTrue(np.all(ys + h <= 26.95 + 1e-9))
+
+    def test_matched_strips_v5_beats_n600_and_n700(self) -> None:
+        wins = search_matched_rectangular_strips({600: 25.0, 700: 26.986}, workers=1)
+        for n, upper in ((600, 24.985), (700, 26.95)):
+            self.assertIn(n, wins)
+            p = wins[n]
+            self.assertLess(p.side_length, upper)
+            res = validate_puzzle(n, p.xs, p.ys, p.angles)
+            self.assertTrue(res.valid, f"n={n} invalid: {res.error}")
             self.assertEqual(res.ambiguous_pairs_checked, 0)
 
 
