@@ -1,4 +1,4 @@
-"""End-to-end multi-stage v2 solver pipeline for the Squares in Squares competition."""
+"""End-to-end multi-stage v4 solver pipeline for the Squares in Squares competition."""
 
 from __future__ import annotations
 
@@ -29,6 +29,9 @@ from src.constructive_v2 import (
     search_gobel_unrestricted,
     search_offcenter_block_shells,
 )
+from src.constructive_v3 import search_sliding_diamond_columns
+from src.constructive_v4 import search_oblique_columns
+from src.contact_lp import refine_packings_parallel
 from src.optimizer import optimize_puzzles_parallel
 from src.validator import score_puzzle, validate_puzzle
 
@@ -90,12 +93,25 @@ def load_seed_csv(
     return loaded
 
 
+def _has_rotation(p: Packing) -> bool:
+    return bool(np.any(np.abs(p.angles) > 1e-6))
+
+
 def _verify_puzzle_worker(
     args: tuple[int, np.ndarray, np.ndarray, np.ndarray],
 ) -> tuple[int, bool, float | None, str | None]:
     n, xs, ys, angles = args
-    res = validate_puzzle(n, xs, ys, angles)
-    return n, res.valid, res.side_length, res.error
+    raw_strings = tuple(
+        [format(float(z), ".16f") for z in arr] for arr in (xs, ys, angles)
+    )
+    res = validate_puzzle(n, xs, ys, angles, raw_strings=raw_strings)
+    ok = bool(res.valid and res.ambiguous_pairs_checked == 0)
+    err = res.error or (
+        f"ambiguous={res.ambiguous_pairs_checked}"
+        if res.ambiguous_pairs_checked
+        else None
+    )
+    return n, ok, res.side_length, err
 
 
 def verify_all_improved(
@@ -134,7 +150,7 @@ def verify_all_improved(
 def write_submission_csv(
     packings: dict[int, Packing],
     baseline_csv: str | Path = Path("data/sample_submission.csv"),
-    output_csv: str | Path = Path("submissions/submission_v2.csv"),
+    output_csv: str | Path = Path("submissions/submission_v4.csv"),
 ) -> Path:
     """Export final packings to CSV preserving exact row/ID layout from ``baseline_csv``."""
     in_path = Path(baseline_csv)
@@ -172,28 +188,33 @@ def write_submission_csv(
 
 def run_pipeline(
     baseline_csv: str | Path = Path("data/sample_submission.csv"),
-    output_csv: str | Path = Path("submissions/submission_v2.csv"),
-    seed_csv: str | Path | None = Path("submissions/submission_v1.csv"),
+    output_csv: str | Path = Path("submissions/submission_v4.csv"),
+    seed_csv: str | Path | None = Path("submissions/submission_v3.csv"),
     lbfgs_budget: float = 2.0,
     workers: int | None = None,
     skip_lbfgs: bool = False,
+    skip_v3_constructive: bool = False,
+    skip_v4_constructive: bool = False,
+    skip_contact_lp: bool = False,
+    contact_lp_steps: int = 80,
     safety_gap: float = DEFAULT_SAFETY_GAP,
 ) -> dict[int, Packing]:
-    """Run the full multi-stage v2 solver pipeline and export a verified CSV submission."""
+    """Run the full multi-stage v4 solver pipeline and export a verified CSV submission."""
     t_all = time.perf_counter()
 
     # 1. Baseline initialization (+ optional verified seed floor)
     packings: dict[int, Packing] = {n: grid_packing(n) for n in range(1, MAX_N + 1)}
     baseline_scores = {n: score_puzzle(n, packings[n].side_length) for n in range(1, MAX_N + 1)}
     score_base = total_packings_score(packings)
-    print(f"Stage 0  [Baseline Grid]:          total_score = {score_base:.6f}")
+    print(f"Stage 0  [Baseline Grid]:          total_score = {score_base:.6f}", flush=True)
 
     if seed_csv:
         loaded = load_seed_csv(packings, seed_csv)
         if loaded > 0:
             print(
                 f"Stage 0b [Seed CSV Floor]:         total_score = {total_packings_score(packings):.6f} "
-                f"(loaded={loaded})"
+                f"(loaded={loaded})",
+                flush=True,
             )
 
     # Stage 1A: Gobel 45-degree 4-corner staircase + diagonal band
@@ -201,7 +222,8 @@ def run_pipeline(
     imp_g = _merge_if_better(packings, search_gobel_45(safety_gap=safety_gap))
     print(
         f"Stage 1A [Gobel 45-deg]:           total_score = {total_packings_score(packings):.6f} "
-        f"(improved={imp_g}, dt={time.perf_counter() - t0:.2f}s)"
+        f"(improved={imp_g}, dt={time.perf_counter() - t0:.2f}s)",
+        flush=True,
     )
 
     # Stage 1B: General shallow-angle tilted bands
@@ -209,7 +231,8 @@ def run_pipeline(
     imp_b = _merge_if_better(packings, search_tilted_bands(safety_gap=safety_gap))
     print(
         f"Stage 1B [Tilted Bands]:           total_score = {total_packings_score(packings):.6f} "
-        f"(improved={imp_b}, dt={time.perf_counter() - t0:.2f}s)"
+        f"(improved={imp_b}, dt={time.perf_counter() - t0:.2f}s)",
+        flush=True,
     )
 
     # Stage 1D: Unrestricted 4-corner Gobel 45-deg search
@@ -217,7 +240,8 @@ def run_pipeline(
     imp_gu = _merge_if_better(packings, search_gobel_unrestricted(safety_gap=safety_gap))
     print(
         f"Stage 1D [Gobel Unrestricted]:     total_score = {total_packings_score(packings):.6f} "
-        f"(improved={imp_gu}, dt={time.perf_counter() - t0:.2f}s)"
+        f"(improved={imp_gu}, dt={time.perf_counter() - t0:.2f}s)",
+        flush=True,
     )
 
     # Stage 1E: Off-center tilted block + 4-corner greedy shells
@@ -225,7 +249,8 @@ def run_pipeline(
     imp_blk = _merge_if_better(packings, search_offcenter_block_shells(safety_gap=safety_gap))
     print(
         f"Stage 1E [Offcenter Block Shells]: total_score = {total_packings_score(packings):.6f} "
-        f"(improved={imp_blk}, dt={time.perf_counter() - t0:.2f}s)"
+        f"(improved={imp_blk}, dt={time.perf_counter() - t0:.2f}s)",
+        flush=True,
     )
 
     # Stage 1F: 4-corner exact-AABB + slack-transfer tilted bands
@@ -235,7 +260,8 @@ def run_pipeline(
     )
     print(
         f"Stage 1F [4-Corner Slack Bands]:   total_score = {total_packings_score(packings):.6f} "
-        f"(improved={imp_sb}, dt={time.perf_counter() - t0:.2f}s)"
+        f"(improved={imp_sb}, dt={time.perf_counter() - t0:.2f}s)",
+        flush=True,
     )
 
     # Stage 1G: Closure pass 1 (L-border + 4-fold pinwheel + monotone deletion)
@@ -243,8 +269,51 @@ def run_pipeline(
     packings = apply_closures(packings, safety_gap=safety_gap)
     print(
         f"Stage 1G [Closure Pass 1]:         total_score = {total_packings_score(packings):.6f} "
-        f"(dt={time.perf_counter() - t0:.2f}s)"
+        f"(dt={time.perf_counter() - t0:.2f}s)",
+        flush=True,
     )
+
+    # Stage 1H: Sliding 45-degree diamond columns + individual SE/TL corner cells (v3)
+    sliding_won_ns: set[int] = set()
+    if not skip_v3_constructive:
+        t0 = time.perf_counter()
+        bounds = {n: p.side_length for n, p in packings.items()}
+        sliding_wins = search_sliding_diamond_columns(
+            bounds,
+            safety_gap=safety_gap,
+            resolution=64,
+            phases=4,
+            iterations=16,
+            workers=workers,
+        )
+        imp_sl = _merge_if_better(packings, sliding_wins)
+        sliding_won_ns = set(sliding_wins.keys())
+        packings = apply_closures(packings, safety_gap=safety_gap)
+        print(
+            f"Stage 1H [Sliding Diamonds + Clos]:total_score = {total_packings_score(packings):.6f} "
+            f"(improved={imp_sl}, dt={time.perf_counter() - t0:.2f}s)",
+            flush=True,
+        )
+
+    # Stage 1I: Oblique sliding columns + independent-slope upright staircases (v4)
+    oblique_won_ns: set[int] = set()
+    if not skip_v4_constructive:
+        t0 = time.perf_counter()
+        bounds = {n: p.side_length for n, p in packings.items()}
+        oblique_wins = search_oblique_columns(
+            bounds,
+            safety_gap=safety_gap,
+            resolution=24,
+            workers=workers,
+        )
+        imp_ob = _merge_if_better(packings, oblique_wins)
+        oblique_won_ns = set(oblique_wins.keys())
+        packings = apply_closures(packings, safety_gap=safety_gap)
+        print(
+            f"Stage 1I [Oblique Sliding + Clos]: total_score = {total_packings_score(packings):.6f} "
+            f"(improved={imp_ob}, dt={time.perf_counter() - t0:.2f}s)",
+            flush=True,
+        )
 
     # Stage 2: Two-wave parallel L-BFGS-B local optimization
     if not skip_lbfgs and lbfgs_budget > 0.0:
@@ -264,7 +333,8 @@ def run_pipeline(
         packings = apply_closures(packings, safety_gap=safety_gap)
         print(
             f"Stage 2A [L-BFGS Wave 1 + Clos]:   total_score = {total_packings_score(packings):.6f} "
-            f"(dt={time.perf_counter() - t0:.2f}s)"
+            f"(dt={time.perf_counter() - t0:.2f}s)",
+            flush=True,
         )
 
         t0 = time.perf_counter()
@@ -294,15 +364,114 @@ def run_pipeline(
         )
         print(
             f"Stage 2B [L-BFGS Wave 2]:          total_score = {total_packings_score(packings):.6f} "
-            f"(n_puzzles={len(wave2_ns)}, dt={time.perf_counter() - t0:.2f}s)"
+            f"(n_puzzles={len(wave2_ns)}, dt={time.perf_counter() - t0:.2f}s)",
+            flush=True,
         )
 
         t0 = time.perf_counter()
         packings = apply_closures(packings, safety_gap=safety_gap)
         print(
-            f"Stage 3  [Closure Pass 2]:         total_score = {total_packings_score(packings):.6f} "
-            f"(dt={time.perf_counter() - t0:.2f}s)"
+            f"Stage 2D [Closure Pass 2]:         total_score = {total_packings_score(packings):.6f} "
+            f"(dt={time.perf_counter() - t0:.2f}s)",
+            flush=True,
         )
+
+    # Stage 2C: Sparse Contact-LP local refinement (v3) + closures + micro-polish
+    if not skip_contact_lp and contact_lp_steps > 0:
+        t0 = time.perf_counter()
+        t_t1 = time.perf_counter()
+        tier1_ns = [
+            n
+            for n in range(2, min(95, MAX_N) + 1)
+            if not _is_perfect_square(n)
+            and (
+                _has_rotation(packings[n])
+                or any(
+                    m in packings and _has_rotation(packings[m])
+                    for m in (n + 1, n + 2)
+                )
+            )
+        ]
+        packings, w1 = refine_packings_parallel(
+            packings,
+            tier1_ns,
+            steps=contact_lp_steps,
+            donors=2,
+            safety_gap=safety_gap,
+            workers=workers,
+        )
+        dt1 = time.perf_counter() - t_t1
+
+        t_t2 = time.perf_counter()
+        tier2_ns = [
+            n
+            for n in range(96, min(185, MAX_N) + 1)
+            if not _is_perfect_square(n) and _has_rotation(packings[n])
+        ]
+        packings, w2 = refine_packings_parallel(
+            packings,
+            tier2_ns,
+            steps=min(40, contact_lp_steps),
+            donors=0,
+            safety_gap=safety_gap,
+            workers=workers,
+        )
+        dt2 = time.perf_counter() - t_t2
+
+        t_t3 = time.perf_counter()
+        tier3_ns = [
+            n
+            for n in range(186, min(400, MAX_N) + 1)
+            if not _is_perfect_square(n) and n in (sliding_won_ns | oblique_won_ns)
+        ]
+        packings, w3 = refine_packings_parallel(
+            packings,
+            tier3_ns,
+            steps=min(25, contact_lp_steps),
+            donors=0,
+            safety_gap=safety_gap,
+            workers=workers,
+        )
+        dt3 = time.perf_counter() - t_t3
+        print(
+            f"Stage 2C [Sparse Contact-LP]:      total_score = {total_packings_score(packings):.6f} "
+            f"(wins={w1}/{len(tier1_ns)} [{dt1:.1f}s], {w2}/{len(tier2_ns)} [{dt2:.1f}s], "
+            f"{w3}/{len(tier3_ns)} [{dt3:.1f}s], total={time.perf_counter() - t0:.2f}s)",
+            flush=True,
+        )
+
+        t0 = time.perf_counter()
+        pre_closure_sides = {n: p.side_length for n, p in packings.items()}
+        packings = apply_closures(packings, safety_gap=safety_gap)
+        print(
+            f"Stage 3  [Closure Pass 3]:         total_score = {total_packings_score(packings):.6f} "
+            f"(dt={time.perf_counter() - t0:.2f}s)",
+            flush=True,
+        )
+
+        changed_small = [
+            n
+            for n in range(4, 151)
+            if not _is_perfect_square(n)
+            and packings[n].side_length < pre_closure_sides[n] - 1e-9
+            and _has_rotation(packings[n])
+        ]
+        if changed_small:
+            t0 = time.perf_counter()
+            packings, w4 = refine_packings_parallel(
+                packings,
+                changed_small,
+                steps=min(40, contact_lp_steps),
+                donors=0,
+                safety_gap=safety_gap,
+                workers=workers,
+            )
+            packings = apply_closures(packings, safety_gap=safety_gap)
+            print(
+                f"Stage 3B [Post-Clos Micro-Polish]: total_score = {total_packings_score(packings):.6f} "
+                f"(wins={w4}/{len(changed_small)}, dt={time.perf_counter() - t0:.2f}s)",
+                flush=True,
+            )
 
     # Stage 4: Final per-puzzle certification & safe fallback
     t0 = time.perf_counter()
@@ -311,11 +480,12 @@ def run_pipeline(
     improved_total = sum(1 for n in range(1, MAX_N + 1) if not packings[n].use_raw_baseline)
     print(
         f"Stage 4  [Certified Final]:        total_score = {final_score:.6f} "
-        f"(improved_puzzles={improved_total}/1000, reverted={reverted}, dt={time.perf_counter() - t0:.2f}s)"
+        f"(improved_puzzles={improved_total}/1000, reverted={reverted}, dt={time.perf_counter() - t0:.2f}s)",
+        flush=True,
     )
 
     out_path = write_submission_csv(packings, baseline_csv=baseline_csv, output_csv=output_csv)
-    print(f"Exported submission to {out_path} (total pipeline time: {time.perf_counter() - t_all:.2f}s)")
+    print(f"Exported submission to {out_path} (total pipeline time: {time.perf_counter() - t_all:.2f}s)", flush=True)
 
     deltas = []
     for n in range(1, MAX_N + 1):
@@ -332,17 +502,38 @@ def run_pipeline(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run Squares in Squares v2 optimization solver.")
+    parser = argparse.ArgumentParser(description="Run Squares in Squares v4 optimization solver.")
     parser.add_argument("--baseline", default="data/sample_submission.csv", help="Path to sample_submission.csv")
-    parser.add_argument("--output", default="submissions/submission_v2.csv", help="Output submission CSV path")
+    parser.add_argument("--output", default="submissions/submission_v4.csv", help="Output submission CSV path")
     parser.add_argument(
         "--seed-csv",
-        default="submissions/submission_v1.csv",
+        default="submissions/submission_v3.csv",
         help="Optional existing verified submission CSV used as initial floor (pass '' to disable)",
     )
     parser.add_argument("--lbfgs-budget", type=float, default=2.0, help="Base seconds per puzzle for L-BFGS-B")
     parser.add_argument("--workers", type=int, default=None, help="Number of parallel worker processes")
     parser.add_argument("--skip-lbfgs", action="store_true", help="Skip Stage 2 L-BFGS-B optimization")
+    parser.add_argument(
+        "--skip-v3-constructive",
+        action="store_true",
+        help="Skip Stage 1H sliding diamond column search",
+    )
+    parser.add_argument(
+        "--skip-v4-constructive",
+        action="store_true",
+        help="Skip Stage 1I oblique sliding column search",
+    )
+    parser.add_argument(
+        "--skip-contact-lp",
+        action="store_true",
+        help="Skip Stage 2C sparse Contact-LP refinement",
+    )
+    parser.add_argument(
+        "--contact-lp-steps",
+        type=int,
+        default=80,
+        help="Maximum Contact-LP steps per Tier-1 puzzle",
+    )
     args = parser.parse_args(argv)
 
     run_pipeline(
@@ -352,6 +543,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         lbfgs_budget=args.lbfgs_budget,
         workers=args.workers,
         skip_lbfgs=args.skip_lbfgs,
+        skip_v3_constructive=args.skip_v3_constructive,
+        skip_v4_constructive=args.skip_v4_constructive,
+        skip_contact_lp=args.skip_contact_lp,
+        contact_lp_steps=args.contact_lp_steps,
     )
     return 0
 

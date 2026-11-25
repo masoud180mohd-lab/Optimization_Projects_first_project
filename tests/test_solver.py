@@ -17,6 +17,9 @@ from src.constructive_v2 import (
     search_4corner_slack_bands,
     search_offcenter_block_shells,
 )
+from src.constructive_v3 import search_sliding_diamond_columns
+from src.constructive_v4 import search_oblique_columns
+from src.contact_lp import refine
 from src.optimizer import _energy_and_grad, optimize_puzzle_lbfgs
 from src.validator import validate_puzzle
 
@@ -126,6 +129,52 @@ class SolverTests(unittest.TestCase):
         self.assertTrue(res.valid, f"n=53 invalid: {res.error}")
         self.assertIsNotNone(res.side_length)
         self.assertLess(res.side_length, 7.86)
+
+    def test_sliding_diamond_columns_beats_v2_targets(self) -> None:
+        wins = search_sliding_diamond_columns({29: 6.0, 54: 7.915, 70: 8.95}, workers=1)
+        for n, upper in ((29, 5.995), (54, 7.895), (70, 8.92)):
+            self.assertIn(n, wins)
+            p = wins[n]
+            self.assertLess(p.side_length, upper)
+            res = validate_puzzle(n, p.xs, p.ys, p.angles)
+            self.assertTrue(res.valid, f"n={n} invalid: {res.error}")
+            self.assertEqual(res.ambiguous_pairs_checked, 0)
+
+    def test_contact_lp_refines_sliding_diamond_n29(self) -> None:
+        wins = search_sliding_diamond_columns({29: 6.0}, workers=1)
+        self.assertIn(29, wins)
+        refined = refine(wins[29], steps=40)
+        self.assertIsNotNone(refined)
+        assert refined is not None
+        self.assertLess(refined.side_length, 5.97)
+        res = validate_puzzle(29, refined.xs, refined.ys, refined.angles)
+        self.assertTrue(res.valid, f"n=29 refined invalid: {res.error}")
+        self.assertEqual(res.ambiguous_pairs_checked, 0)
+
+    def test_contact_lp_skips_perfect_square(self) -> None:
+        self.assertIsNone(refine(grid_packing(16)))
+
+    def test_oblique_columns_beats_v3_targets(self) -> None:
+        wins = search_oblique_columns({29: 5.965, 55: 8.0, 71: 9.0}, workers=1)
+        for n, upper in ((29, 5.961), (55, 7.98), (71, 8.97)):
+            self.assertIn(n, wins)
+            p = wins[n]
+            self.assertLess(p.side_length, upper)
+            res = validate_puzzle(n, p.xs, p.ys, p.angles)
+            self.assertTrue(res.valid, f"n={n} invalid: {res.error}")
+            self.assertEqual(res.ambiguous_pairs_checked, 0)
+
+    def test_contact_lp_refines_oblique_n55(self) -> None:
+        wins = search_oblique_columns({55: 8.0}, workers=1)
+        self.assertIn(55, wins)
+        p55 = wins[55]
+        self.assertLess(p55.side_length, 7.98)
+        refined = refine(p55, steps=30)
+        if refined is not None:
+            self.assertLess(refined.side_length, p55.side_length)
+            res = validate_puzzle(55, refined.xs, refined.ys, refined.angles)
+            self.assertTrue(res.valid, f"n=55 refined invalid: {res.error}")
+            self.assertEqual(res.ambiguous_pairs_checked, 0)
 
 
 if __name__ == "__main__":
