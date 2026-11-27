@@ -1,4 +1,4 @@
-"""End-to-end multi-stage v5 solver pipeline for the Squares in Squares competition."""
+"""End-to-end multi-stage v6 solver pipeline for the Squares in Squares competition."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from src.constructive_v2 import (
 from src.constructive_v3 import search_sliding_diamond_columns
 from src.constructive_v4 import search_oblique_columns
 from src.constructive_v5 import search_matched_rectangular_strips
+from src.constructive_v6 import search_four_wall_strips
 from src.contact_lp import refine_packings_parallel
 from src.optimizer import optimize_puzzles_parallel
 from src.validator import score_puzzle, validate_puzzle
@@ -151,7 +152,7 @@ def verify_all_improved(
 def write_submission_csv(
     packings: dict[int, Packing],
     baseline_csv: str | Path = Path("data/sample_submission.csv"),
-    output_csv: str | Path = Path("submissions/submission_v5.csv"),
+    output_csv: str | Path = Path("submissions/submission_v6.csv"),
 ) -> Path:
     """Export final packings to CSV preserving exact row/ID layout from ``baseline_csv``."""
     in_path = Path(baseline_csv)
@@ -189,19 +190,20 @@ def write_submission_csv(
 
 def run_pipeline(
     baseline_csv: str | Path = Path("data/sample_submission.csv"),
-    output_csv: str | Path = Path("submissions/submission_v5.csv"),
-    seed_csv: str | Path | None = Path("submissions/submission_v4.csv"),
+    output_csv: str | Path = Path("submissions/submission_v6.csv"),
+    seed_csv: str | Path | None = Path("submissions/submission_v5.csv"),
     lbfgs_budget: float = 2.0,
     workers: int | None = None,
     skip_lbfgs: bool = False,
     skip_v3_constructive: bool = False,
     skip_v4_constructive: bool = False,
     skip_v5_constructive: bool = False,
+    skip_v6_constructive: bool = False,
     skip_contact_lp: bool = False,
     contact_lp_steps: int = 80,
     safety_gap: float = DEFAULT_SAFETY_GAP,
 ) -> dict[int, Packing]:
-    """Run the full multi-stage v5 solver pipeline and export a verified CSV submission."""
+    """Run the full multi-stage v6 solver pipeline and export a verified CSV submission."""
     t_all = time.perf_counter()
 
     # 1. Baseline initialization (+ optional verified seed floor)
@@ -345,6 +347,25 @@ def run_pipeline(
             flush=True,
         )
 
+    # Stage 1K: Four tilted boundary strips + global bipartite MIS matching (v6)
+    v6_won_ns: set[int] = set()
+    if not skip_v6_constructive:
+        t0 = time.perf_counter()
+        v6_wins = search_four_wall_strips(
+            {n: p.side_length for n, p in packings.items()},
+            safety_gap=safety_gap,
+            max_width=14,
+            workers=workers,
+        )
+        imp_v6 = _merge_if_better(packings, v6_wins)
+        v6_won_ns = set(v6_wins.keys())
+        packings = apply_closures(packings, safety_gap=safety_gap)
+        print(
+            f"Stage 1K [Four-Wall Strips + Clos]:total_score = {total_packings_score(packings):.6f} "
+            f"(improved={imp_v6}, dt={time.perf_counter() - t0:.2f}s)",
+            flush=True,
+        )
+
     # Stage 2: Two-wave parallel L-BFGS-B local optimization
     if not skip_lbfgs and lbfgs_budget > 0.0:
         t0 = time.perf_counter()
@@ -453,7 +474,7 @@ def run_pipeline(
             n
             for n in range(186, min(400, MAX_N) + 1)
             if not _is_perfect_square(n)
-            and n in (sliding_won_ns | oblique_won_ns | v5_won_ns)
+            and n in (sliding_won_ns | oblique_won_ns | v5_won_ns | v6_won_ns)
         ]
         packings, w3 = refine_packings_parallel(
             packings,
@@ -533,12 +554,12 @@ def run_pipeline(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run Squares in Squares v5 optimization solver.")
+    parser = argparse.ArgumentParser(description="Run Squares in Squares v6 optimization solver.")
     parser.add_argument("--baseline", default="data/sample_submission.csv", help="Path to sample_submission.csv")
-    parser.add_argument("--output", default="submissions/submission_v5.csv", help="Output submission CSV path")
+    parser.add_argument("--output", default="submissions/submission_v6.csv", help="Output submission CSV path")
     parser.add_argument(
         "--seed-csv",
-        default="submissions/submission_v4.csv",
+        default="submissions/submission_v5.csv",
         help="Optional existing verified submission CSV used as initial floor (pass '' to disable)",
     )
     parser.add_argument("--lbfgs-budget", type=float, default=2.0, help="Base seconds per puzzle for L-BFGS-B")
@@ -558,6 +579,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--skip-v5-constructive",
         action="store_true",
         help="Skip Stage 1J matched rectangular strip search",
+    )
+    parser.add_argument(
+        "--skip-v6-constructive",
+        action="store_true",
+        help="Skip Stage 1K four-wall strip search",
     )
     parser.add_argument(
         "--skip-contact-lp",
@@ -582,6 +608,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         skip_v3_constructive=args.skip_v3_constructive,
         skip_v4_constructive=args.skip_v4_constructive,
         skip_v5_constructive=args.skip_v5_constructive,
+        skip_v6_constructive=args.skip_v6_constructive,
         skip_contact_lp=args.skip_contact_lp,
         contact_lp_steps=args.contact_lp_steps,
     )

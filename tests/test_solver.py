@@ -20,6 +20,7 @@ from src.constructive_v2 import (
 from src.constructive_v3 import search_sliding_diamond_columns
 from src.constructive_v4 import search_oblique_columns
 from src.constructive_v5 import pack_rectangle, search_matched_rectangular_strips
+from src.constructive_v6 import search_four_wall_strips
 from src.contact_lp import refine
 from src.optimizer import _energy_and_grad, optimize_puzzle_lbfgs
 from src.validator import validate_puzzle
@@ -196,6 +197,15 @@ class SolverTests(unittest.TestCase):
             res = validate_puzzle(n, p.xs, p.ys, p.angles)
             self.assertTrue(res.valid, f"n={n} invalid: {res.error}")
             self.assertEqual(res.ambiguous_pairs_checked, 0)
+
+    def test_four_wall_strips_v6_beats_n757(self) -> None:
+        wins = search_four_wall_strips({757: 27.9983}, workers=1)
+        self.assertIn(757, wins)
+        p = wins[757]
+        self.assertLess(p.side_length, 27.975)
+        res = validate_puzzle(757, p.xs, p.ys, p.angles)
+        self.assertTrue(res.valid, f"n=757 invalid: {res.error}")
+        self.assertEqual(res.ambiguous_pairs_checked, 0)
 
 
 if __name__ == "__main__":
